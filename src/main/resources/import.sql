@@ -1,0 +1,2 @@
+--INSERT INTO MyEntity (id,field) VALUES (43,'Pablo Avila');
+--INSERT INTO Greeting (id,name) VALUES (32,'Ruben Avila');
