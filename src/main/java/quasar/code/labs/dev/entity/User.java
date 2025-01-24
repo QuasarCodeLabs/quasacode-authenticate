@@ -29,7 +29,7 @@ public class User extends PanacheEntity {
 
     @NotNull
     @Column(unique = true, nullable = false, insertable = true)
-    @Size(min = 6, message = "{length_password}")
+    @Size(min = 6, max = 72, message = "{length_password}")
     @NotBlank(message = "{password_empty}")
     @Pattern(regexp = "^(?=.*[a-zA-Z])(?=.*\\d)(?=.*[!@#$%^&*()_+\\-=\\[\\]{};':\"\\\\|,.<>\\/?]).+$", message = "{pattern_password}")
     private String password;
