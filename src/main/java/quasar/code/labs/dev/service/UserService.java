@@ -109,7 +109,7 @@ public class UserService {
                 .expiresAt(duration)
                 .sign();
     }
-    @Bulkhead(value = 10, waitingTaskQueue = 10)
+
     private void sendVerificationEmail(String email,String name ,String token) {
         try {
 
