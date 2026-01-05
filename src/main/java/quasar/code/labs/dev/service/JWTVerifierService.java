@@ -16,7 +16,7 @@ public class JWTVerifierService {
         this.publicKey = publicKey;
     }
 
-    public DecodedJWT verifyToken(String token) throws Exception {
+    public DecodedJWT verifyToken(String token){
         Algorithm algorithm = Algorithm.RSA256(publicKey, null); // Se pasa la clave pública
         JWTVerifier verifier = JWT.require(algorithm)
                 .withIssuer("https://quasarcode.dev")

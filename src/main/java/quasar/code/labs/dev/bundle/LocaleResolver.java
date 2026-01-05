@@ -1,11 +1,13 @@
 package quasar.code.labs.dev.bundle;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.RequestScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 
 import java.util.Locale;
 @RequestScoped
+@RegisterForReflection
 public class LocaleResolver {
 
 

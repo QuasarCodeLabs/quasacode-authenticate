@@ -3,6 +3,8 @@ package quasar.code.labs.dev.lifecycle;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.QuarkusApplication;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.logging.Logger;
 
 public class CustomApp implements QuarkusApplication {

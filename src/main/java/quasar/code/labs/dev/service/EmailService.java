@@ -3,13 +3,16 @@ package quasar.code.labs.dev.service;
 import jakarta.mail.*;
 import jakarta.mail.internet.InternetAddress;
 import jakarta.mail.internet.MimeMessage;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.Properties;
 
 import static java.awt.SystemColor.text;
 
+@Slf4j
 public class EmailService {
     public static final String NEWSLETTER_QUASARCODE_DEV = "newsletter@quasarcode.dev";
+
     private final String smtpHost;
     private final String smtpPort;
     private final String username;

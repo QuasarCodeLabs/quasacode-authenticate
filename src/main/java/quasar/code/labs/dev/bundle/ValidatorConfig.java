@@ -1,5 +1,6 @@
 package quasar.code.labs.dev.bundle;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -9,6 +10,7 @@ import org.hibernate.validator.messageinterpolation.ResourceBundleMessageInterpo
 import java.util.Locale;
 
 @ApplicationScoped
+@RegisterForReflection
 public class ValidatorConfig {
 
 

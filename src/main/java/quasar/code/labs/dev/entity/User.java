@@ -1,24 +1,25 @@
 package quasar.code.labs.dev.entity;
 
-import io.quarkus.hibernate.orm.panache.PanacheEntity;
+import io.quarkus.hibernate.reactive.panache.PanacheEntity;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.*;
-import lombok.Getter;
-import lombok.RequiredArgsConstructor;
-import lombok.Setter;
-import lombok.ToString;
+import lombok.*;
 import org.mindrot.jbcrypt.BCrypt;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
 
 @Entity
 @Setter
 @Getter
 @ToString
-@RequiredArgsConstructor
-@Table(name = "users")
+@RegisterForReflection
+@Table(name = "users", schema = "quasar_authenticate")
 public class User extends PanacheEntity {
 
-    @NotEmpty
-    @NotBlank
+    @NotBlank(message = "{person.name.notnull}")
     @Column(unique = true, nullable = false, insertable = true)
     private String username;
 
@@ -38,54 +39,32 @@ public class User extends PanacheEntity {
     @Column(nullable = false, insertable = true)
     private String role;
 
+    @NotNull()
+    @Column(nullable = false, insertable = true)
+    @ManyToMany(fetch = FetchType.EAGER)
+    @JoinTable(
+            name = "user_app",
+            schema = "quasar_authenticate",
+            joinColumns = @JoinColumn(name = "user_id", nullable = false),
+            inverseJoinColumns = @JoinColumn(name = "app_id", nullable = false)
+    )
+    @NotEmpty(message = "{apps_required}")
+    @Size(min = 1)
+    private List<App> apps;
+
     @Column(nullable = false, updatable = true)
     private Boolean active;
 
-    @PrePersist
-    @PreUpdate
-    public void hashPassword() {
-        if (this.password != null && !this.password.isBlank() ) {
-            this.password = BCrypt.hashpw(this.password, BCrypt.gensalt());
-        }
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof User)) return false;
+        User other = (User) o;
+        return id != null && id.equals(other.id);
     }
 
-    public String getUsername() {
-        return username;
-    }
-
-    public String getEmail() {
-        return email;
-    }
-
-    public String getPassword() {
-        return password;
-    }
-
-    public String getRole() {
-        return role;
-    }
-
-    public Boolean getActive() {
-        return active;
-    }
-
-    public void setUsername(String username) {
-        this.username = username;
-    }
-
-    public void setRole(String role) {
-        this.role = role;
-    }
-
-    public void setPassword(String password) {
-        this.password = password;
-    }
-
-    public void setEmail(String email) {
-        this.email = email;
-    }
-
-    public void setActive(Boolean active) {
-        this.active = active;
+    @Override
+    public int hashCode() {
+        return getClass().hashCode();
     }
 }
