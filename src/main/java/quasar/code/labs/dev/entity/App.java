@@ -1,6 +1,8 @@
 package quasar.code.labs.dev.entity;
 
-import io.quarkus.hibernate.reactive.panache.PanacheEntity;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import io.quarkus.hibernate.reactive.panache.PanacheEntityBase;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.persistence.*;
 import lombok.*;
@@ -13,8 +15,15 @@ import java.util.Objects;
 @Getter
 @ToString
 @RegisterForReflection
+@NoArgsConstructor
+@AllArgsConstructor
+@JsonIgnoreProperties(ignoreUnknown = true)
 @Table(name = "app", schema = "quasar_authenticate")
-public class App extends PanacheEntity {
+public class App extends PanacheEntityBase {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.AUTO)
+    public Long id;
 
     @Column(nullable = false, updatable = true, unique = true)
     @Enumerated(EnumType.STRING)

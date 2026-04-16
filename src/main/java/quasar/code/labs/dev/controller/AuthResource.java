@@ -51,7 +51,7 @@ public class AuthResource {
     @POST
     @Path("/prospect")
     @PermitAll
-    public Uni<Response> prospectus(User loginRequest) {
+    public Uni<Response> prospect(User loginRequest) {
         Locale locale = localeResolver.resolveLocale();
 
         // Registrar al usuario de forma reactiva

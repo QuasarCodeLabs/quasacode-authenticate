@@ -1,19 +1,22 @@
 package quasar.code.labs.dev.service;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.hibernate.reactive.panache.common.WithTransaction;
+import io.quarkus.redis.client.reactive.ReactiveRedisClient;
 import io.smallrye.jwt.build.Jwt;
 import io.smallrye.mutiny.Uni;
 import io.smallrye.mutiny.subscription.UniEmitter;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.mail.MessagingException;
 import jakarta.persistence.PersistenceException;
 import jakarta.validation.ConstraintViolationException;
 import jakarta.ws.rs.core.NewCookie;
 import jakarta.ws.rs.core.Response;
 import org.eclipse.microprofile.faulttolerance.CircuitBreaker;
 import org.eclipse.microprofile.faulttolerance.Fallback;
+import org.eclipse.microprofile.faulttolerance.Retry;
 import org.eclipse.microprofile.faulttolerance.Timeout;
 import org.mindrot.jbcrypt.BCrypt;
 import quasar.code.labs.dev.bundle.LocaleResolver;
@@ -22,6 +25,7 @@ import quasar.code.labs.dev.entity.App;
 import quasar.code.labs.dev.entity.User;
 import quasar.code.labs.dev.exceptions.user.UserException;
 import quasar.code.labs.dev.repository.AppRepository;
+import quasar.code.labs.dev.repository.RedisRepository;
 import quasar.code.labs.dev.repository.UserRepository;
 import quasar.code.labs.dev.utils.KeyLoader;
 
@@ -46,21 +50,27 @@ public class UserService {
     public static final String ISSUER = "https://quasarcode.dev";
     public static final String USER = "player";
 
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final UserRepository userRepository;
     private final AppRepository appRepository;
     private final MessageService messageService;
     private final EmailTemplateRenderer emailTemplateRenderer;
     private final LocaleResolver localeResolver;
+    private final EmailService emailService;
+    private final KafkaProducerService kafkaProducerService;
+    private final RedisRepository redisRepository;
 
     @Inject
-    public UserService(UserRepository userRepository, AppRepository appRepository, MessageService messageService, EmailTemplateRenderer emailTemplateRenderer, LocaleResolver localeResolver) {
+    public UserService(UserRepository userRepository, AppRepository appRepository, MessageService messageService, EmailTemplateRenderer emailTemplateRenderer, LocaleResolver localeResolver, EmailService emailService, KafkaProducerService kafkaProducerService, RedisRepository redisRepository) {
         this.userRepository = userRepository;
         this.appRepository = appRepository;
         this.messageService = messageService;
         this.emailTemplateRenderer = emailTemplateRenderer;
         this.localeResolver = localeResolver;
+        this.emailService = emailService;
+        this.kafkaProducerService = kafkaProducerService;
+        this.redisRepository = redisRepository;
     }
-
 
     /**
      * Documentación para el método `authenticate` que utiliza autenticación basada en contraseña y correo electrónico.
@@ -123,7 +133,21 @@ public class UserService {
      *         - Usuario ya existe con el mismo nombre
      *         - Correo si ya existente
      */
-    @Timeout(value = 10, unit = ChronoUnit.SECONDS)
+    @Retry(
+            maxRetries = 3,
+            delay = 200,
+            retryOn = {
+                    java.io.IOException.class,
+                    java.util.concurrent.TimeoutException.class,
+                    //io.vertx.redis.client.RedisException.class,
+                    java.sql.SQLException.class
+            },
+            abortOn = {
+                    UserException.class,
+                    ConstraintViolationException.class
+            }
+    )
+/*    @Timeout(value = 10, unit = ChronoUnit.SECONDS)
     @CircuitBreaker(
             requestVolumeThreshold = 10,
             failureRatio = 0.5,
@@ -131,11 +155,12 @@ public class UserService {
             successThreshold = 5,
             skipOn = UserException.class)
     @Fallback(fallbackMethod = "fallbackSystemOccupied",
-            skipOn = UserException.class)
+            skipOn = UserException.class)*/
     @WithTransaction
     public Uni<Void> registerUser(User user) {
 
         Locale locale = localeResolver.resolveLocale();
+
 
         if (!validPassword(user.getPassword())) {
             return Uni.createFrom().failure(
@@ -150,19 +175,32 @@ public class UserService {
         }
 
 
-        List<Uni<App>> validationTasks = user.getApps().stream()
-                .map(app ->
-                        appRepository.findById(app.id)
-                                .onItem().ifNull().failWith(() ->
-                                        new UserException(messageService.getMessage("app_not_exist", locale))
-                                )
-                ).toList();
-
+            List<Uni<App>> validationTasks = user.getApps().stream()
+                    .map(app ->  redisRepository.leerClaveReactiva("app:" + app.id.toString())
+                            .onItem().ifNotNull().transform(json -> {
+                                try {
+                                    logger.info("JSON:"+json);
+                                    return objectMapper.readValue(json, App.class);
+                                } catch (JsonProcessingException e) {
+                                    throw new RuntimeException(e);
+                                }
+                            }).onFailure(RuntimeException.class)
+                            .invoke(f -> logger.severe("Error parsing JSON: " + f.getMessage()))
+                            .onFailure()
+                           .recoverWithNull()
+                            .onItem().ifNull().switchTo(
+                            appRepository.findById(app.id)
+                                    .onItem().ifNull().failWith(() ->
+                                            new UserException(messageService.getMessage("app_not_exist", locale))
+                                    )
+                            )
+                    ).toList();
 
         return Uni.combine().all().unis(validationTasks)
                 .with(list -> {
                     List<App> appsEncontradas = list.stream()
-                            .map(item -> (App) item)
+                            .filter(Objects::nonNull)
+                            .map(App.class::cast)
                             .toList();
 
                     user.setApps(appsEncontradas);
@@ -170,13 +208,59 @@ public class UserService {
                 })
 
                 // 3️⃣ Buscar si el usuario ya existe para esas apps
-                .onItem().transformToUni(validatedUser ->
-                        userRepository.find(
-                                        "FROM User u WHERE u.username = ?1 OR u.email = ?2",
-                                        validatedUser.getUsername(),
-                                        validatedUser.getEmail()
-                                ).firstResult()
+                .onItem().transformToUni(validatedUser -> {
+                            String indexName = "user:index:username:" + validatedUser.getUsername();
+                            String indexEmail = "user:index:email:" + validatedUser.getEmail();
+
+                            // Intentamos buscar por Username en Redis
+                            return redisRepository.leerClaveReactiva(indexName)
+                                    // Si no hay por username, buscamos por email en Redis
+                                    .onItem().ifNull().switchTo(() -> redisRepository.leerClaveReactiva(indexEmail))
+                                    // Ahora tenemos un Uni que puede traer el ID (o ser null)
+                                    .onItem().transformToUni(userId -> {
+                                        if (userId != null) {
+                                            // Si encontramos el ID, traemos el objeto completo de Redis
+                                            return redisRepository.leerClaveReactiva("user:" + userId)
+                                                    .onItem().transform(json -> {
+                                                        try {
+                                                            return objectMapper.readValue(json, User.class);
+                                                        } catch (Exception e) {
+                                                            return null;
+                                                        }
+                                                    });
+                                        }
+                                        // Si userId es null, devolvemos null para que el siguiente paso sepa que debe ir a DB
+                                        return Uni.createFrom().nullItem();
+                                    })
+                                    .onItem().ifNull().switchTo(() ->
+                                            userRepository.find(
+                                                            "FROM User u LEFT JOIN FETCH u.apps WHERE u.username = ?1 OR u.email = ?2",
+                                                            validatedUser.getUsername(),
+                                                            validatedUser.getEmail()
+                                                    ).firstResult()
+                                                    .onItem().ifNotNull().call(userFromDb -> {
+                                                        try {
+                                                            logger.info("Usuario encontrado en DB, actualizando Redis para la próxima vez...");
+                                                            String userJson = objectMapper.writeValueAsString(userFromDb);
+                                                            String userId = userFromDb.id.toString();
+
+                                                            // Guardamos el objeto y sus dos índices (username y email)
+                                                            return Uni.combine().all().unis(
+                                                                    redisRepository.guardarClaveValor("user:" + userId, userJson),
+                                                                    redisRepository.guardarClaveValor("user:index:username:" + userFromDb.getUsername(), userId),
+                                                                    redisRepository.guardarClaveValor("user:index:email:" + userFromDb.getEmail(), userId)
+                                                            ).discardItems();
+
+                                                        } catch (Exception e) {
+                                                            logger.severe("No se pudo serializar el usuario para Redis: " + e.getMessage());
+                                                            return Uni.createFrom().voidItem(); // Continuamos aunque falle el caché
+                                                        }
+
+                                                    })
+                                    )
+
                                 .onItem().transformToUni(existingUser -> {
+                                        User userToProcess;
                                     if (existingUser != null) {
                                         Set<Long> existingAppIds = existingUser.getApps().stream()
                                                 .map(app -> app.id)
@@ -191,7 +275,7 @@ public class UserService {
                                             String errorKey = existingUser.getEmail().equalsIgnoreCase(validatedUser.getEmail())
                                                     ? "email_exist"
                                                     : "user_exist";
-                                            return Uni.createFrom().failure(
+                                            return Uni.createFrom().<User>failure(
                                                     new UserException(messageService.getMessage(errorKey, locale))
                                             );
                                         }
@@ -201,19 +285,28 @@ public class UserService {
                                                 existingUser.getApps().add(app);
                                             }
                                         });
-
-                                        return userRepository.persistAndFlush(existingUser);
+                                        userToProcess = existingUser;
+                                        //return kafkaProducerService.send(existingUser)
+                                                //.replaceWith(existingUser);
+                                        //return userRepository.persist(existingUser);
+                                    } else {
+                                        validatedUser.setPassword(
+                                                BCrypt.hashpw(validatedUser.getPassword(), BCrypt.gensalt())
+                                        );
+                                        validatedUser.setRole("prospect");
+                                        validatedUser.setActive(false);
+                                        userToProcess = validatedUser;
                                     }
-
-
-                                    validatedUser.setPassword(
-                                            BCrypt.hashpw(validatedUser.getPassword(), BCrypt.gensalt())
-                                    );
-                                    validatedUser.setRole("prospect");
-                                    validatedUser.setActive(false);
-
-                                    return userRepository.persistAndFlush(validatedUser);
-                                })
+                                        return saveUserInRedis(userToProcess)
+                                                .onItem().call(
+                                                        savedUser ->
+                                                                kafkaProducerService.send(savedUser)
+                                                                        .replaceWith(savedUser)
+                                                );
+                                    //return kafkaProducerService.send(validatedUser)
+                                            //.replaceWith(validatedUser);
+                                    //return userRepository.persist(validatedUser);
+                                }
                 )
 
                 .onItem().transformToUni(persistedUser -> {
@@ -238,6 +331,8 @@ public class UserService {
                             messageService.getMessage("registration_error", locale)
                     );
                 });
+
+    });
     }
 
     /**
@@ -283,7 +378,7 @@ public class UserService {
                     user.setActive(Boolean.TRUE);
                     user.setRole(USER);
 
-                    return userRepository.persistAndFlush(user) // Persistir cambios
+                    return userRepository.persist(user) // Persistir cambios
                             .onItem().ifNotNull().transformToUni(v -> {
                                 String newToken = generateTokenUser(v.getEmail(), v); // Generar token
                                 return Uni.createFrom().item(generateCookie(newToken)); // Generar cookie
@@ -347,40 +442,27 @@ public class UserService {
 
     private Uni<Void> sendVerificationEmail(String email, String name, String token) {
         return Uni.createFrom().item(() -> {
-// Configuración del servicio de correo
-                    Properties props = EmailServiceConfig.loadEmailConfig();
-                    EmailService emailService = new EmailService(
-                            props.getProperty("email.host"),
-                            props.getProperty("email.port"),
-                            props.getProperty("email.username"),
-                            props.getProperty("email.password")
-                    );
-// Renderizar el asunto y el cuerpo del correo
+                    // 1. Renderizar el asunto y el cuerpo del correo de forma síncrona
                     String subject = emailTemplateRenderer.renderTemplate("verify_mail.subject");
                     Map<String, String> variables = Map.of("name", name, "token", token);
                     String emailBody = emailTemplateRenderer.renderTemplate("verify_mail.body", variables);
-                    logger.log(Level.INFO, "Subject: {0}", subject);
-                    logger.log(Level.OFF, "Email Body: {0}", emailBody);
-                    return new AbstractMap.SimpleEntry<>(emailService, new AbstractMap.SimpleEntry<>(subject, emailBody));
+
+                    logger.log(Level.INFO, "Preparando envío de correo para: {0}", email);
+
+                    // Retornamos los datos necesarios para el siguiente paso
+                    return new AbstractMap.SimpleEntry<>(subject, emailBody);
                 })
                 .onItem().transformToUni(entry -> {
-                    EmailService emailService = entry.getKey();
-                    String subject = entry.getValue().getKey();
-                    String emailBody = entry.getValue().getValue();
-// Envío del correo de forma asíncrona
-                    return Uni.createFrom().emitter(emitter -> {
-                        try {
-                            emailService.send(email, subject, emailBody);
-                            emitter.complete(null); // Indica que la operación ha terminado
-                        } catch (MessagingException e) {
-                            emitter.fail(e); // Propaga el error
-                        }
-                    });
+                    String subject = entry.getKey();
+                    String emailBody = entry.getValue();
+
+                    // 2. IMPORTANTE: Retornar el Uni del servicio de correo
+                    return emailService.sendVerificationEmail(email, subject, emailBody);
                 })
                 .onFailure().invoke(throwable -> {
-                    logger.severe("Error al enviar el correo: " + throwable.getMessage());
-                }).replaceWithVoid();
-        }
+                    logger.severe("Error crítico al enviar el correo a " + email + ": " + throwable.getMessage());
+                });
+    }
 
     private String generateVerificationToken(String email) {
         return Jwt.issuer(ISSUER)
@@ -439,5 +521,24 @@ public class UserService {
                 .secure(true)
                 .sameSite(NewCookie.SameSite.NONE)
                 .build();
+    }
+
+    private Uni<User> saveUserInRedis(User user) {
+        try {
+            UUID uuid = UUID.randomUUID();
+            user.setId(uuid);
+            String json = objectMapper.writeValueAsString(user);
+
+            return Uni.combine().all().unis(
+                    redisRepository.guardarClaveValor("user:" + uuid.toString(), json),
+                    redisRepository.guardarClaveValor("user:index:username:" + user.getUsername(), uuid.toString()),
+                    redisRepository.guardarClaveValor("user:index:email:" + user.getEmail(), uuid.toString())
+            ).asTuple().replaceWith(user); // Retorna el objeto User original al terminar
+
+        } catch (JsonProcessingException e) {
+            logger.severe("Error serializando usuario para Redis: " + e.getMessage());
+            // Si falla el caché, podrías decidir si fallar todo o solo loguear
+            return Uni.createFrom().item(user);
+        }
     }
 }

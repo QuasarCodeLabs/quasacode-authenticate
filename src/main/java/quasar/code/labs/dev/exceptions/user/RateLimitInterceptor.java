@@ -24,8 +24,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 @RegisterForReflection
 public class RateLimitInterceptor implements ContainerRequestFilter {
 
-    private static final int MAX_REQUESTS = 5;
-    private static final long TIME_WINDOW_SECONDS = 3;
+    private static final int MAX_REQUESTS = 400000;
+    private static final long TIME_WINDOW_SECONDS = 1;
 
     // Caché con auto-limpieza
     private final Cache<String, RequestInfo> requestCounts = Caffeine.newBuilder()
